@@ -572,7 +572,7 @@ func TestEdgeMulti(t *testing.T) {
 		rawG[i] = RawType(i % 2)
 	}
 	nRepeatG := 20
-	expectG := make([]FrameIndex, 0)
+	var expectG []FrameIndex
 	for i := dsp.NPresamples + 2; i < len(rawG)*nRepeatG-(dsp.NSamples-dsp.NPresamples); i += 2 {
 		expectG = append(expectG, FrameIndex(i))
 	}
@@ -698,7 +698,7 @@ func BenchmarkEdgeTrigger0TriggersOpsAreSamples(b *testing.B) {
 	}
 	segment := NewDataSegment(raw, 1, 0, time.Now(), time.Millisecond)
 	dsp.stream.AppendSegment(segment)
-	records := make([]*DataRecord, 0)
+	var records []*DataRecord
 	b.ResetTimer()
 
 	records = dsp.edgeTriggerComputeAppend(records)
@@ -731,7 +731,7 @@ func BenchmarkLevelTrigger0TriggersOpsAreSamples(b *testing.B) {
 	}
 	segment := NewDataSegment(raw, 1, 0, time.Now(), time.Millisecond)
 	dsp.stream.AppendSegment(segment)
-	records := make([]*DataRecord, 0)
+	var records []*DataRecord
 	b.ResetTimer()
 
 	records = dsp.levelTriggerComputeAppend(records)
