@@ -120,8 +120,6 @@ func (dsp *DataStreamProcessor) ConfigureTrigger(state TriggerState) {
 }
 
 func (dsp *DataStreamProcessor) processSegment(segment *DataSegment) {
-	dsp.changeMutex.Lock()
-	defer dsp.changeMutex.Unlock()
 	dsp.DecimateData(segment)
 	dsp.stream.AppendSegment(segment)
 	records, _ := dsp.TriggerData()

@@ -203,7 +203,9 @@ func (ds *AnySource) ProcessSegments() error {
 		wg.Add(1)
 		go func(dsp *DataStreamProcessor, channelIndex int) {
 			defer wg.Done()
-			dsp.processSegment(&segment)
+			dsp.changeMutex.Lock()
+			defer dsp.changeMutex.Unlock()
+			dsp.processSegment(&segment) // does not lock
 			numberWritten[channelIndex] = dsp.numberWritten
 		}(dsp, i)
 	}
@@ -408,7 +410,7 @@ func (ds *AnySource) WriteControl(config *WriteControlConfig) error {
 					timebase, Build.RunStart, nrows, ncols, ds.nchan, rowNum, colNum, filename,
 					ds.name, ds.chanNames[i], ds.chanNumbers[i])
 			}
-			if config.WriteOFF && !dsp.projectors.IsZero() {
+			if config.WriteOFF && dsp.HasProjectors() {
 				filename := fmt.Sprintf(filenamePattern, dsp.Name, "off")
 				dsp.DataPublisher.SetOFF(i, dsp.NPresamples, dsp.NSamples, fps,
 					timebase, Build.RunStart, nrows, ncols, ds.nchan, rowNum, colNum, filename,
@@ -461,8 +463,9 @@ func (ds *AnySource) ConfigureProjectorsBases(channelIndex int, projectors mat.D
 // ChannelsWithProjectors returns a list of the ChannelIndicies of channels that have projectors loaded
 func (ds *AnySource) ChannelsWithProjectors() []int {
 	result := make([]int, 0)
-	for channelIndex := 0; channelIndex < len(ds.processors); channelIndex++ {
-		dsp := ds.processors[channelIndex]
+	for channelIndex, dsp := range ds.processors {
+		dsp.changeMutex.Lock()
+		defer dsp.changeMutex.Unlock()
 		if dsp.HasProjectors() {
 			result = append(result, channelIndex)
 		}
