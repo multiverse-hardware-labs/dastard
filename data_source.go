@@ -185,6 +185,7 @@ type AnySource struct {
 	numberWrittenTicker *time.Ticker
 	runMutex            sync.Mutex
 	runDone             sync.WaitGroup
+	abortSelfMutex      sync.Mutex
 }
 
 // ProcessSegments processes a single outstanding for each processor in ds
@@ -481,6 +482,8 @@ func (ds *AnySource) Nchan() int {
 // Running tells whether the source is actively running.
 // If there's no ds.abortSelf yet, or it's closed, then source is NOT running.
 func (ds *AnySource) Running() bool {
+	ds.abortSelfMutex.Lock()
+	defer ds.abortSelfMutex.Unlock()
 	if ds.abortSelf == nil {
 		return false
 	}
@@ -535,6 +538,8 @@ func (ds *AnySource) setDefaultChannelNames() {
 func (ds *AnySource) PrepareRun() error {
 	ds.runMutex.Lock()
 	defer ds.runMutex.Unlock()
+	ds.abortSelfMutex.Lock()
+	defer ds.abortSelfMutex.Unlock()
 	if ds.nchan <= 0 {
 		return fmt.Errorf("PrepareRun could not run with %d channels (expect > 0)", ds.nchan)
 	}
@@ -598,17 +603,6 @@ func (ds *AnySource) PrepareRun() error {
 		dsp.SetPubRecords()
 		dsp.SetPubSummaries()
 
-		// This goroutine will run until the ds.abortSelf channel or the ch==ds.output[channelIndex]
-		// channel is closed, depending on ds.noProcess (which is false except for testing)
-		// 	ds.runDone.Add(1)
-		// 	go func(ch <-chan DataSegment) {
-		// 		defer ds.runDone.Done()
-		// 		if ds.noProcess {
-		// 			<-ds.abortSelf
-		// 		} else {
-		// 			dsp.ProcessData(ch)
-		// 		}
-		// 	}(dataSegmentChan)
 	}
 	ds.lastread = time.Now()
 	ds.SetWritingState(WritingState{})
