@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/davecgh/go-spew/spew"
@@ -30,7 +31,7 @@ type SourceControl struct {
 	// TODO: Add sources for ROACH, Abaco
 	activeSource DataSource
 
-	status        ServerStatus
+	status        atomic.Value
 	clientUpdates chan<- ClientUpdate
 	totalData     Heartbeat
 	heartbeats    chan Heartbeat
@@ -51,9 +52,19 @@ func NewSourceControl() *SourceControl {
 
 	}
 	sc.erroring = NewErroringSource()
-	sc.status.Ncol = make([]int, 0)
-	sc.status.Nrow = make([]int, 0)
+	status := ServerStatus{Ncol: make([]int, 0), Nrow: make([]int, 0)}
+	sc.SetStatus(status)
 	return sc
+}
+
+// Status loads a ServerStatus object atomically
+func (s *SourceControl) Status() ServerStatus {
+	return s.status.Load().(ServerStatus)
+}
+
+// SetStatus sets a ServerStatus object atomically
+func (s *SourceControl) SetStatus(x ServerStatus) {
+	s.status.Store(x)
 }
 
 // ServerStatus the status that SourceControl reports to clients.
@@ -200,8 +211,10 @@ func (s *SourceControl) ConfigurePulseLengths(sizes SizeObject, reply *bool) err
 	}
 	err := s.activeSource.ConfigurePulseLengths(sizes.Nsamp, sizes.Npre)
 	*reply = (err == nil)
-	s.status.Npresamp = sizes.Npre
-	s.status.Nsamples = sizes.Nsamp
+	status := s.Status()
+	status.Npresamp = sizes.Npre
+	status.Nsamples = sizes.Nsamp
+	s.SetStatus(status)
 	s.broadcastStatus()
 	return err
 }
@@ -211,23 +224,24 @@ func (s *SourceControl) Start(sourceName *string, reply *bool) error {
 	if s.activeSource != nil {
 		return fmt.Errorf("activeSource is not nil, want nil (you should call Stop)")
 	}
+	status := s.Status()
 	name := strings.ToUpper(*sourceName)
 	switch name {
 	case "SIMPULSESOURCE":
 		s.activeSource = DataSource(s.simPulses)
-		s.status.SourceName = "SimPulses"
+		status.SourceName = "SimPulses"
 
 	case "TRIANGLESOURCE":
 		s.activeSource = DataSource(s.triangle)
-		s.status.SourceName = "Triangles"
+		status.SourceName = "Triangles"
 
 	case "LANCEROSOURCE":
 		s.activeSource = DataSource(s.lancero)
-		s.status.SourceName = "Lancero"
+		status.SourceName = "Lancero"
 
 	case "ERRORINGSOURCE":
 		s.activeSource = DataSource(s.erroring)
-		s.status.SourceName = "Erroring"
+		status.SourceName = "Erroring"
 
 	// TODO: Add cases here for ROACH, ABACO, etc.
 
@@ -236,28 +250,29 @@ func (s *SourceControl) Start(sourceName *string, reply *bool) error {
 	}
 
 	log.Printf("Starting data source named %s\n", *sourceName)
-	s.status.Running = true
+	status.Running = true
 	if err := Start(s.activeSource); err != nil {
-		s.status.Running = false
+		status.Running = false
 		s.activeSource = nil
 		return err
 	}
-	s.status.Nchannels = s.activeSource.Nchan()
+	status.Nchannels = s.activeSource.Nchan()
 	if ls, ok := s.activeSource.(*LanceroSource); ok {
-		s.status.Ncol = make([]int, ls.ncards)
-		s.status.Nrow = make([]int, ls.ncards)
+		status.Ncol = make([]int, ls.ncards)
+		status.Nrow = make([]int, ls.ncards)
 		for i, device := range ls.active {
-			s.status.Ncol[i] = device.ncols
-			s.status.Nrow[i] = device.nrows
+			status.Ncol[i] = device.ncols
+			status.Nrow[i] = device.nrows
 		}
 	} else {
-		s.status.Ncol = make([]int, 0)
-		s.status.Nrow = make([]int, 0)
+		status.Ncol = make([]int, 0)
+		status.Nrow = make([]int, 0)
 	}
 	s.broadcastStatus()
 	s.broadcastTriggerState()
 	s.broadcastChannelNames()
 	*reply = true
+	s.SetStatus(status)
 	return nil
 }
 
@@ -281,7 +296,9 @@ func (s *SourceControl) Stop(dummy *string, reply *bool) error {
 // the source was stopped
 func (s *SourceControl) handlePosibleStoppedSource() {
 	if s.activeSource != nil && !s.activeSource.Running() {
-		s.status.Running = false
+		status := s.Status()
+		status.Running = false
+		s.SetStatus(status)
 		s.activeSource = nil
 	}
 }
@@ -406,7 +423,7 @@ func (s *SourceControl) CoupleFBToErr(couple *bool, reply *bool) error {
 
 func (s *SourceControl) broadcastHeartbeat() {
 	s.handlePosibleStoppedSource()
-	s.totalData.Running = s.status.Running
+	s.totalData.Running = s.Status().Running
 	s.clientUpdates <- ClientUpdate{"ALIVE", s.totalData}
 	s.totalData.DataMB = 0
 	s.totalData.Time = 0
@@ -415,20 +432,22 @@ func (s *SourceControl) broadcastHeartbeat() {
 func (s *SourceControl) broadcastStatus() {
 	s.handlePosibleStoppedSource()
 	if s.activeSource != nil {
-		s.status.ChannelsWithProjectors = s.activeSource.ChannelsWithProjectors()
+		status := s.Status()
+		status.ChannelsWithProjectors = s.activeSource.ChannelsWithProjectors()
+		s.SetStatus(status)
 	}
 	s.clientUpdates <- ClientUpdate{"STATUS", s.status}
 }
 
 func (s *SourceControl) broadcastWritingState() {
-	if s.activeSource != nil && s.status.Running {
+	if s.activeSource != nil && s.Status().Running {
 		state := s.activeSource.ComputeWritingState()
 		s.clientUpdates <- ClientUpdate{"WRITING", state}
 	}
 }
 
 func (s *SourceControl) broadcastTriggerState() {
-	if s.activeSource != nil && s.status.Running {
+	if s.activeSource != nil && s.Status().Running {
 		state := s.activeSource.ComputeFullTriggerState()
 		log.Printf("TriggerState: %v\n", state)
 		s.clientUpdates <- ClientUpdate{"TRIGGER", state}
@@ -436,7 +455,7 @@ func (s *SourceControl) broadcastTriggerState() {
 }
 
 func (s *SourceControl) broadcastChannelNames() {
-	if s.activeSource != nil && s.status.Running {
+	if s.activeSource != nil && s.Status().Running {
 		configs := s.activeSource.ChannelNames()
 		log.Printf("chanNames: %v\n", configs)
 		s.clientUpdates <- ClientUpdate{"CHANNELNAMES", configs}
@@ -481,8 +500,10 @@ func RunRPCServer(portrpc int, block bool) {
 	if err == nil {
 		sourceControl.ConfigureLanceroSource(&lsc, &okay)
 	}
-	err = viper.UnmarshalKey("status", &sourceControl.status)
-	sourceControl.status.Running = false
+	var status ServerStatus
+	err = viper.UnmarshalKey("status", &status)
+	status.Running = false
+	sourceControl.SetStatus(status)
 	if err == nil {
 		sourceControl.broadcastStatus()
 	}
