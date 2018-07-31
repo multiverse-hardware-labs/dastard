@@ -193,6 +193,7 @@ type AnySource struct {
 func (ds *AnySource) ProcessSegments() error {
 	writingState := ds.WritingState()
 	var wg sync.WaitGroup
+	numberWritten := make([]int, ds.nchan)
 	for i, dsp := range ds.processors {
 		segment := ds.segments[i]
 		if segment.processed {
@@ -200,16 +201,13 @@ func (ds *AnySource) ProcessSegments() error {
 			return fmt.Errorf("channelIndex %v has already processed segment", i)
 		}
 		wg.Add(1)
-		go func(dsp *DataStreamProcessor) {
+		go func(dsp *DataStreamProcessor, channelIndex int) {
 			defer wg.Done()
 			dsp.processSegment(&segment)
-		}(dsp)
+			numberWritten[channelIndex] = dsp.numberWritten
+		}(dsp, i)
 	}
 	wg.Wait()
-	numberWritten := make([]int, ds.nchan)
-	for i, dsp := range ds.processors {
-		numberWritten[i] = dsp.numberWritten
-	}
 	if writingState.Active && !writingState.Paused {
 		select {
 		case <-ds.numberWrittenTicker.C:
@@ -672,7 +670,7 @@ func (ds *AnySource) ChangeTriggerState(state *FullTriggerState) error {
 	}
 	for _, channelIndex := range state.ChannelIndicies {
 		dsp := ds.processors[channelIndex]
-		dsp.ConfigureTrigger(state.TriggerState)
+		dsp.ConfigureTrigger(state.TriggerState) // calls dsp.changeMutex.Lock()
 	}
 	return nil
 }
