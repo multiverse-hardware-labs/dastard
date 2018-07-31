@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
+
 	"time"
 
 	"github.com/davecgh/go-spew/spew"
@@ -54,6 +56,16 @@ type DataSource interface {
 func (ds *AnySource) Wait() error {
 	// fmt.Println("ds.Wait")
 	ds.runDone.Wait()
+	return nil
+}
+
+// SetExperimentStateLabel sets the experiment state label
+func (ds *AnySource) SetExperimentStateLabel(stateLabel string) error {
+	writingState := ds.WritingState()
+	if err := writingState.SetExperimentStateLabel(stateLabel); err != nil {
+		return err
+	}
+	ds.SetWritingState(writingState)
 	return nil
 }
 
@@ -152,25 +164,24 @@ func rcCode(row, col, rows, cols int) RowColCode {
 // AnySource implements features common to any object that implements
 // DataSource, including the output channels and the abort channel.
 type AnySource struct {
-	nchan        int           // how many channels to provide
-	name         string        // what kind of source is this?
-	chanNames    []string      // one name per channel
-	chanNumbers  []int         // names have format "prefixNumber", this is the number
-	rowColCodes  []RowColCode  // one RowColCode per channel
-	signed       []bool        // is the raw data signed, one per channel
-	voltsPerArb  []float32     // the physical units per arb, one per channel
-	sampleRate   float64       // samples per second
-	samplePeriod time.Duration // time per sample
-	lastread     time.Time
-	nextFrameNum FrameIndex // frame number for the next frame we will receive
-	processors   []*DataStreamProcessor
-	abortSelf    chan struct{} // This can signal the Run() goroutine to stop
-	broker       *TriggerBroker
-	// publishSync  *PublishSync
+	nchan               int           // how many channels to provide
+	name                string        // what kind of source is this?
+	chanNames           []string      // one name per channel
+	chanNumbers         []int         // names have format "prefixNumber", this is the number
+	rowColCodes         []RowColCode  // one RowColCode per channel
+	signed              []bool        // is the raw data signed, one per channel
+	voltsPerArb         []float32     // the physical units per arb, one per channel
+	sampleRate          float64       // samples per second
+	samplePeriod        time.Duration // time per sample
+	lastread            time.Time
+	nextFrameNum        FrameIndex // frame number for the next frame we will receive
+	processors          []*DataStreamProcessor
+	abortSelf           chan struct{} // This can signal the Run() goroutine to stop
+	broker              *TriggerBroker
 	noProcess           bool // Set true only for testing.
 	heartbeats          chan Heartbeat
 	segments            []DataSegment
-	writingState        WritingState
+	writingState        atomic.Value
 	numberWrittenTicker *time.Ticker
 	runMutex            sync.Mutex
 	runDone             sync.WaitGroup
@@ -180,6 +191,7 @@ type AnySource struct {
 // returns when all segments have been processed
 // it's a more synchnous version of each dsp launching it's own goroutine
 func (ds *AnySource) ProcessSegments() error {
+	writingState := ds.WritingState()
 	var wg sync.WaitGroup
 	for i, dsp := range ds.processors {
 		segment := ds.segments[i]
@@ -198,7 +210,7 @@ func (ds *AnySource) ProcessSegments() error {
 	for i, dsp := range ds.processors {
 		numberWritten[i] = dsp.numberWritten
 	}
-	if ds.writingState.Active && !ds.writingState.Paused {
+	if writingState.Active && !writingState.Paused {
 		select {
 		case <-ds.numberWrittenTicker.C:
 			clientMessageChan <- ClientUpdate{tag: "NUMBERWRITTEN",
@@ -209,6 +221,16 @@ func (ds *AnySource) ProcessSegments() error {
 	return nil
 }
 
+// WritingState returns a WritingState object in an atomic way
+func (ds *AnySource) WritingState() WritingState {
+	return ds.writingState.Load().(WritingState)
+}
+
+// SetWritingState sets a WritingState object in an atomic way
+func (ds *AnySource) SetWritingState(x WritingState) {
+	ds.writingState.Store(x)
+}
+
 // StartRun tells the hardware to switch into data streaming mode.
 // It's a no-op for simulated (software) sources
 func (ds *AnySource) StartRun() error {
@@ -217,23 +239,23 @@ func (ds *AnySource) StartRun() error {
 
 // SetExperimentStateLabel writes to a file with name like _experiment_state.txt
 // the file is created upon the first call to this function for a given file writing
-func (ds *AnySource) SetExperimentStateLabel(stateLabel string) error {
-	if ds.writingState.experimentStateFile == nil {
+func (writingState *WritingState) SetExperimentStateLabel(stateLabel string) error {
+	if writingState.experimentStateFile == nil {
 		// create state file if neccesary
 		var err error
-		ds.writingState.experimentStateFile, err = os.Create(ds.writingState.ExperimentStateFilename)
+		writingState.experimentStateFile, err = os.Create(writingState.ExperimentStateFilename)
 		if err != nil {
 			return err
 		}
 		// write header
-		_, err1 := ds.writingState.experimentStateFile.WriteString("# unix time in nanoseconds, state label")
+		_, err1 := writingState.experimentStateFile.WriteString("# unix time in nanoseconds, state label")
 		if err1 != nil {
 			return err
 		}
 	}
-	ds.writingState.ExperimentStateLabel = stateLabel
-	ds.writingState.ExperimentStateLabelUnixNano = time.Now().Nanosecond()
-	_, err := ds.writingState.experimentStateFile.WriteString(fmt.Sprintf("%v, %v\n", ds.writingState.ExperimentStateLabelUnixNano, stateLabel))
+	writingState.ExperimentStateLabel = stateLabel
+	writingState.ExperimentStateLabelUnixNano = time.Now().Nanosecond()
+	_, err := writingState.experimentStateFile.WriteString(fmt.Sprintf("%v, %v\n", writingState.ExperimentStateLabelUnixNano, stateLabel))
 	if err != nil {
 		return err
 	}
@@ -270,6 +292,7 @@ func makeDirectory(basepath string) (string, error) {
 // For WriteLJH22 == true and/or WriteLJH3 == true all channels will have writing enabled
 // For WriteOFF == true, only chanels with projectors set will have writing enabled
 func (ds *AnySource) WriteControl(config *WriteControlConfig) error {
+	writingState := ds.WritingState()
 	request := strings.ToUpper(config.Request)
 	var filenamePattern, path string
 	// ds.runMutex.Lock()
@@ -290,7 +313,7 @@ func (ds *AnySource) WriteControl(config *WriteControlConfig) error {
 			}
 		}
 
-		path = ds.writingState.BasePath
+		path = writingState.BasePath
 		if len(config.Path) > 0 {
 			path = config.Path
 		}
@@ -320,7 +343,7 @@ func (ds *AnySource) WriteControl(config *WriteControlConfig) error {
 		}
 		if len(config.Request) > 7 { // "UNPAUSE label" format already validated
 			stateLabel := config.Request[8:]
-			if err := ds.SetExperimentStateLabel(stateLabel); err != nil {
+			if err := writingState.SetExperimentStateLabel(stateLabel); err != nil {
 				return err
 			}
 		}
@@ -334,16 +357,19 @@ func (ds *AnySource) WriteControl(config *WriteControlConfig) error {
 	// Hold the lock before doing actual changes
 	if strings.HasPrefix(request, "PAUSE") {
 		for _, dsp := range ds.processors {
+			dsp.changeMutex.Lock()
+			defer dsp.changeMutex.Unlock()
 			dsp.DataPublisher.SetPause(true)
 		}
-		ds.writingState.Paused = true
+		writingState.Paused = true
 
 	} else if strings.HasPrefix(request, "UNPAUSE") {
 		for _, dsp := range ds.processors {
+			dsp.changeMutex.Lock()
+			defer dsp.changeMutex.Unlock()
 			dsp.DataPublisher.SetPause(false)
 		}
-
-		ds.writingState.Paused = false
+		writingState.Paused = false
 
 	} else if strings.HasPrefix(request, "STOP") {
 		for _, dsp := range ds.processors {
@@ -353,15 +379,15 @@ func (ds *AnySource) WriteControl(config *WriteControlConfig) error {
 			dsp.DataPublisher.RemoveOFF()
 			dsp.DataPublisher.RemoveLJH3()
 		}
-		ds.writingState.Active = false
-		ds.writingState.Paused = false
-		ds.writingState.FilenamePattern = ""
-		if ds.writingState.experimentStateFile != nil {
-			ds.writingState.experimentStateFile.Close()
+		writingState.Active = false
+		writingState.Paused = false
+		writingState.FilenamePattern = ""
+		if writingState.experimentStateFile != nil {
+			writingState.experimentStateFile.Close()
 		}
-		ds.writingState.ExperimentStateFilename = ""
-		ds.writingState.ExperimentStateLabel = ""
-		ds.writingState.ExperimentStateLabelUnixNano = 0
+		writingState.ExperimentStateFilename = ""
+		writingState.ExperimentStateLabel = ""
+		writingState.ExperimentStateLabelUnixNano = 0
 
 	} else if strings.HasPrefix(request, "START") {
 		channelsWithOff := 0
@@ -397,12 +423,14 @@ func (ds *AnySource) WriteControl(config *WriteControlConfig) error {
 				dsp.DataPublisher.SetLJH3(i, timebase, nrows, ncols, filename)
 			}
 		}
-		ds.writingState.Active = true
-		ds.writingState.Paused = false
-		ds.writingState.BasePath = path
-		ds.writingState.FilenamePattern = filenamePattern
-		ds.writingState.ExperimentStateFilename = fmt.Sprintf(filenamePattern, "experiment_state", "txt")
+		writingState.Active = true
+		writingState.Paused = false
+		writingState.BasePath = path
+		writingState.FilenamePattern = filenamePattern
+		writingState.ExperimentStateFilename = fmt.Sprintf(filenamePattern, "experiment_state", "txt")
 	}
+
+	ds.SetWritingState(writingState)
 	return nil
 }
 
@@ -420,7 +448,7 @@ type WritingState struct {
 
 // ComputeWritingState doesn't need to compute, but just returns the writingState
 func (ds *AnySource) ComputeWritingState() WritingState {
-	return ds.writingState
+	return ds.WritingState()
 }
 
 // ConfigureProjectorsBases calls SetProjectorsBasis on ds.processors[channelIndex]
@@ -509,7 +537,7 @@ func (ds *AnySource) PrepareRun() error {
 	if ds.nchan <= 0 {
 		return fmt.Errorf("PrepareRun could not run with %d channels (expect > 0)", ds.nchan)
 	}
-	ds.setDefaultChannelNames() // should be overwritten in ds.Sample()
+	ds.setDefaultChannelNames() // channel names should have been assigned in Sample, this assigns default names otherwise
 	ds.abortSelf = make(chan struct{})
 
 	// Start a TriggerBroker to handle secondary triggering
@@ -582,6 +610,7 @@ func (ds *AnySource) PrepareRun() error {
 		// 	}(dataSegmentChan)
 	}
 	ds.lastread = time.Now()
+	ds.SetWritingState(WritingState{})
 	return nil
 }
 
@@ -611,9 +640,10 @@ type FullTriggerState struct {
 // ComputeFullTriggerState uses a map to collect channels with identical TriggerStates, so they
 // can be sent all together as one unit.
 func (ds *AnySource) ComputeFullTriggerState() []FullTriggerState {
-
 	result := make(map[TriggerState][]int)
 	for _, dsp := range ds.processors {
+		dsp.changeMutex.Lock()
+		defer dsp.changeMutex.Unlock()
 		chans, ok := result[dsp.TriggerState]
 		if ok {
 			result[dsp.TriggerState] = append(chans, dsp.channelIndex)

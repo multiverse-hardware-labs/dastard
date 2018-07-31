@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/davecgh/go-spew/spew"
 	"gonum.org/v1/gonum/mat"
 )
 
@@ -153,8 +154,10 @@ func TestWritingFiles(t *testing.T) {
 	if err := ds.WriteControl(config); err != nil {
 		t.Error(err)
 	}
-	stat, statErr := ds.writingState.experimentStateFile.Stat()
+
+	stat, statErr := ds.WritingState().experimentStateFile.Stat()
 	if statErr != nil {
+		spew.Dump(ds.WritingState().experimentStateFile)
 		t.Error(statErr)
 	}
 	if !(stat.Size() == 54 || stat.Size() == 53) { // travis gets a different answer than my mac, is this platform dependent?
